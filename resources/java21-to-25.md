@@ -45,8 +45,9 @@ these methods execute the action immediately but will be removed in a future rel
 ### `sun.misc.Unsafe` memory-access methods emit runtime warnings (Java 24, JEP 498)
 
 The memory-access methods in `sun.misc.Unsafe` were deprecated for removal in Java 23
-(JEP 471) and now emit **runtime warnings** by default in Java 24. In Java 26+, they
-will throw exceptions, and later be removed entirely.
+(JEP 471) and now emit **runtime warnings** by default in Java 24. In a future release
+(JDK 26 at the earliest) they will throw exceptions by default, and later be removed
+entirely.
 
 **Search pattern**: `import sun.misc.Unsafe`, `Unsafe.getUnsafe()`,
 `UNSAFE.putInt`, `UNSAFE.getLong`, `UNSAFE.allocateMemory`,
@@ -65,30 +66,51 @@ that uses VarHandle/FFM. You can audit your application with:
 java --sun-misc-unsafe-memory-access=deny -jar your-app.jar
 ```
 
-### Dynamic agent loading restricted (Java 21+, JEP 451)
+### Dynamic agent loading warns (Java 21, JEP 451)
 
-Dynamically attaching Java agents at runtime (via the Attach API) now requires the
-explicit flag `-XX:+EnableDynamicAgentLoading`. Without it, the JVM will refuse to
-load the agent.
+Dynamically attaching a Java agent to a running JVM (via the Attach API) now prints a
+warning to standard error. This is a **warning, not a failure** — the agent still
+loads. JEP 451 is explicitly preparing users for a *future* release that will
+disallow dynamic loading by default.
 
-**Search pattern**: agents loaded at runtime (profilers, APM tools, debuggers).
+```
+WARNING: A {Java,JVM TI} agent has been loaded dynamically (...)
+WARNING: Dynamic loading of agents will be disallowed by default in a future release
+```
 
-**Fix**: add `-XX:+EnableDynamicAgentLoading` to JVM startup flags if you use
-runtime-attached agents (e.g., JProfiler, YourKit, Datadog, New Relic). Agents
-specified at startup with `-javaagent:` are not affected.
+**Search pattern**: agents attached at runtime (profilers, APM tools, `VirtualMachine.loadAgent`,
+Byte Buddy Agent `ByteBuddyAgent.install()`, Mockito inline mock maker).
+
+**Fix**: pass `-XX:+EnableDynamicAgentLoading` to suppress the warning and to
+future-proof the startup command. Agents specified at startup with `-javaagent:` are
+not affected and never warn. Serviceability tools such as `jcmd` and `jconsole`
+also continue to work without warnings.
+
+> Note: this landed in **Java 21**, so it may already apply before you start this hop.
+> It is listed here because the warning becomes hard to ignore as you move toward the
+> release that flips the default to "disallowed".
 
 ### Non-generational ZGC mode removed (Java 24, JEP 490)
 
-The non-generational mode of ZGC has been removed. If your startup scripts contain
-`-XX:+UseZGC` without `-XX:+ZGenerational`, the JVM now runs generational ZGC
-automatically. If your scripts contained `-XX:-ZGenerational` to explicitly disable
-generational mode, that flag must be removed — it will cause a startup error.
+The non-generational mode of ZGC has been removed and the `ZGenerational` option is
+now **obsolete**. Behavior in Java 24/25:
 
-**Search pattern**: `-XX:-ZGenerational`, `-XX:+UseZGC` in startup scripts.
+| Startup flags | Result |
+|---|---|
+| `-XX:+UseZGC` | Generational ZGC, no warning |
+| `-XX:+UseZGC -XX:+ZGenerational` | Generational ZGC + obsolete-option warning |
+| `-XX:+UseZGC -XX:-ZGenerational` | Generational ZGC + obsolete-option warning (the request to disable is ignored) |
 
-**Fix**: remove `-XX:-ZGenerational` if present. `-XX:+UseZGC` alone now implies
-generational mode. The `-XX:+ZGenerational` flag itself is also deprecated since
-Java 23 (it's the default now) — you can remove it for cleanliness.
+**Search pattern**: `-XX:+ZGenerational`, `-XX:-ZGenerational`, `-XX:+UseZGC` in startup scripts.
+
+**Fix**: remove both `ZGenerational` variants. `-XX:+UseZGC` alone implies generational
+mode. The option is only *obsolete* today (warning), but JEP 490 states it "will expire
+in a future release, at which point it will not be recognized by the HotSpot JVM, which
+will refuse to start" — so treat removal as mandatory, not cosmetic.
+
+Workloads switching from non-generational ZGC may also see differences in GC log output
+and in data exposed through the serviceability/management APIs — update any log parsing
+or dashboards that depend on them.
 
 ### JNI usage warnings (Java 24, JEP 472)
 
@@ -102,6 +124,22 @@ declarations, `Linker.nativeLinker()`.
 you are aware that future Java versions may require explicit opt-in flags
 (`--enable-native-access`). The FFM API already requires this flag for unrestricted
 native access.
+
+### Legacy `COMPAT` locale data removed (Java 23)
+
+The legacy JRE locale data (`-Djava.locale.providers=COMPAT` or `JRE`) has been
+**removed**. It was deprecated with a startup warning in Java 21; specifying `COMPAT`
+or `JRE` in `java.locale.providers` now has no effect at all — the JVM silently uses
+CLDR data instead.
+
+**Search pattern**: `java.locale.providers` in startup scripts, `JAVA_TOOL_OPTIONS`,
+Dockerfiles, `application.properties`, CI configs.
+
+**Fix**: remove the property and migrate to CLDR locale data. If your application still
+depends on JDK 8-era formatted output, replace localized `FormatStyle` formatters with
+explicit `DateTimeFormatter.ofPattern(...)` patterns so the output is under your control
+rather than the locale database's. See the CLDR 42 notes in the 17 → 21 guide — this is
+the same problem surfacing a second time, now with no escape hatch.
 
 ### Legacy API removals
 
@@ -167,7 +205,9 @@ java {
 }
 ```
 
-Ensure Gradle wrapper is at least **8.12+** for Java 25 support.
+Ensure the Gradle wrapper is at least **9.1.0** — that is the first release with Java 25
+toolchain support *and* the first that can run on a Java 25 JVM. Gradle 8.14 only reaches
+Java 24. Note that Gradle 9 itself requires Java 17+ to run.
 
 ---
 
@@ -258,14 +298,28 @@ virtual threads:
 + private static final ScopedValue<User> CURRENT_USER = ScopedValue.newInstance();
 +
 + public void handleRequest(User user) {
-+     ScopedValue.runWhere(CURRENT_USER, user, this::processRequest);
-+     // automatically unbound when runWhere exits — no cleanup needed
++     ScopedValue.where(CURRENT_USER, user).run(this::processRequest);
++     // automatically unbound when run() exits — no cleanup needed
 + }
 +
 + public User getCurrentUser() {
-+     return CURRENT_USER.get(); // throws if not bound
++     return CURRENT_USER.get(); // throws NoSuchElementException if not bound
 + }
 ```
+
+**API shape warning**: the `ScopedValue.runWhere(...)` / `ScopedValue.callWhere(...)`
+static methods that appeared in the Java 21–23 *preview* API were **removed in Java 24**
+(JEP 487). The finalized Java 25 API is entirely fluent:
+
+| Need | Java 25 API |
+|---|---|
+| Run a `Runnable` | `ScopedValue.where(KEY, value).run(runnable)` |
+| Call and return a value | `ScopedValue.where(KEY, value).call(op)` |
+| Bind several values at once | `ScopedValue.where(K1, v1).where(K2, v2).run(...)` |
+| Read with a default | `KEY.orElse(fallback)` — note: `orElse` no longer accepts `null` in Java 25 |
+
+If you adopted scoped values while they were in preview, this is a **compile-time
+breaking change** you must fix during this hop.
 
 ### Flexible constructor bodies (Java 25, JEP 513)
 
@@ -345,7 +399,7 @@ static void main(String[])` entry points continue to work unchanged.
 | Flexible Constructor Bodies | Java 25 (JEP 513) | Statements allowed before `super()`/`this()` calls |
 | Module Import Declarations | Java 25 (JEP 511) | `import module java.base;` imports all exported packages |
 | Compact Source Files | Java 25 (JEP 512) | Simplified `main()` entry points without class boilerplate |
-| Compact Object Headers | Java 25 (JEP 519) | Object headers reduced from 96–128 bits to 64 bits — smaller heap footprint |
+| Compact Object Headers | Java 25 (JEP 519) | Object headers reduced from 96–128 bits to 64 bits — smaller heap footprint. **Opt-in** via `-XX:+UseCompactObjectHeaders` |
 | Generational Shenandoah | Java 25 (JEP 521) | Shenandoah GC now has a generational mode for improved performance |
 | Key Derivation Function API | Java 25 (JEP 510) | Standard API for HKDF and other KDFs — no more custom implementations |
 | AOT Class Loading & Profiling | Java 25 (JEPs 514, 515) | Simplified ahead-of-time caches and method profiling for faster startup |
@@ -375,9 +429,24 @@ still offers features like `tryLock()` that `synchronized` does not.
 
 ### Compact Object Headers (JEP 519)
 
-Java 25 finalizes compact object headers, reducing object header sizes from 96–128 bits
-to 64 bits on 64-bit architectures. This reduces heap usage and improves cache locality.
-It is enabled by default — no flags needed.
+Java 25 promotes compact object headers from an *experimental* to a *product* feature,
+reducing object header size from 96–128 bits to 64 bits on 64-bit architectures. This
+reduces heap usage and improves cache locality.
+
+**It is NOT enabled by default.** JEP 519 explicitly states that making it the default
+is a non-goal. You must opt in:
+
+```bash
+# Java 24 (experimental — both flags required)
+java -XX:+UnlockExperimentalVMOptions -XX:+UseCompactObjectHeaders -jar app.jar
+
+# Java 25 (product feature — no unlock flag needed)
+java -XX:+UseCompactObjectHeaders -jar app.jar
+```
+
+Measure before and after: the benefit is largest for heaps dominated by many small
+objects. Code that assumes a specific object layout (rare, but present in some
+serialization or off-heap libraries) should be tested with the flag enabled.
 
 ### Ahead-of-Time (AOT) improvements (JEPs 514, 515)
 
@@ -395,24 +464,28 @@ java -XX:AOTCache=app.aot -cp app.jar com.example.Main
 
 Use this flag to audit and prepare for Unsafe removal:
 
-| Value | Behavior | Default in |
+| Value | Behavior | Status |
 |---|---|---|
-| `allow` | No warnings | Java 23 |
-| `warn` | Warning on first use | Java 24–25 |
-| `debug` | Warning + stack trace on every use | — |
-| `deny` | Throws `UnsupportedOperationException` | Java 26+ |
+| `allow` | No warnings | Default in Java 23 |
+| `warn` | Warning on first use | Default in Java 24–25 |
+| `debug` | Warning + stack trace on every use | Opt-in |
+| `deny` | Throws `UnsupportedOperationException` | Opt-in today; planned to become the default in a future release (JDK 26 at the earliest) |
 
 Run with `deny` to proactively find all Unsafe usages before they become hard errors.
 
 ### Dynamic agent loading
 
-If you use APM tools or profilers that attach at runtime, add to your JVM flags:
+If you use APM tools or profilers that attach at runtime (rather than via `-javaagent:`),
+add to your JVM flags:
 
 ```
 -XX:+EnableDynamicAgentLoading
 ```
 
-Agents loaded at startup via `-javaagent:` are unaffected.
+This suppresses the JEP 451 warning today and future-proofs the command line for the
+release that disallows dynamic loading by default. Agents loaded at startup via
+`-javaagent:` are unaffected, as are `jcmd`/`jconsole`. See the blocker section above
+for details.
 
 ### Generational Shenandoah (JEP 521)
 

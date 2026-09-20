@@ -22,8 +22,22 @@ reflection into `java.base` will fail at runtime.
 **Preferred fix**: upgrade the offending library. Most frameworks released
 JPMS-compatible versions by 2021.
 
+**The `--illegal-access` escape hatch is gone.** In JDK 9–16 you could relax
+encapsulation wholesale with `--illegal-access=permit|warn|debug`. JEP 403 makes this
+option **obsolete in JDK 17**: it is ignored and merely prints a warning. If your
+startup scripts rely on it, it is silently no longer doing anything — you must replace
+it with targeted flags:
+
+```diff
+- --illegal-access=permit
++ --add-opens java.base/java.lang=ALL-UNNAMED
++ --add-opens java.base/java.util=ALL-UNNAMED
+```
+
 **Temporary workaround**: add `--add-opens` scoped to the minimum necessary packages.
-Document each one with a deadline to remove.
+Document each one with a deadline to remove. Note that `--add-opens` can also be baked
+into a jar's `MANIFEST.MF` via `Add-Opens:`, and into Surefire/Failsafe via
+`<argLine>`, so tests and production match.
 
 ### Security Manager deprecated for removal (Java 17)
 
@@ -210,8 +224,19 @@ builder patterns, keep it as a regular class.
 - **Pattern Matching for `instanceof`** (Java 16): eliminate redundant casts after type checks.
 - **Switch Expressions** (Java 14): replace fall-through switch blocks with expression form.
 - **Text Blocks** (Java 15): replace heavily escaped multi-line strings (JSON, XML, SQL, HTML).
+- **`Stream.toList()`** (Java 16): replaces `.collect(Collectors.toList())` — shorter, and returns an unmodifiable list. The behavioral difference matters: if callers mutate the result, keep `Collectors.toList()` or use `Collectors.toCollection(ArrayList::new)`.
 - **Helpful NullPointerExceptions** (Java 14): enabled by default; stack traces pinpoint the exact null dereference.
 - **New `RandomGenerator` APIs** (Java 17): prefer `java.util.random.RandomGenerator` for explicit algorithm choices.
+- **Other small API wins**: `String.formatted()`, `stripIndent()`, `translateEscapes()` (Java 15); `Files.mismatch()` (Java 12); `Collectors.teeing()` (Java 12); `Stream.mapMulti()` (Java 16); `HexFormat` (Java 17); `Objects.requireNonNullElse()` (Java 9).
+
+```diff
+- List<String> names = people.stream()
+-     .map(Person::name)
+-     .collect(Collectors.toList());
++ List<String> names = people.stream()
++     .map(Person::name)
++     .toList();
+```
 
 ---
 

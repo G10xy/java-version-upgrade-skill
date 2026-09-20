@@ -27,6 +27,76 @@ will fail to compile on Java 11:
 
 **Search pattern**: `import javax.xml.bind`, `import javax.xml.ws`, `import javax.activation`, `import org.omg.`, `import javax.annotation.`
 
+### Version string format changed (Java 9, JEP 223)
+
+The `java.version` system property no longer starts with `1.`:
+
+| JDK | `java.version` | `java.specification.version` |
+|---|---|---|
+| 8 | `1.8.0_392` | `1.8` |
+| 11 | `11.0.22` | `11` |
+
+**Impact**: hand-rolled version checks silently misbehave. `"11.0.22".startsWith("1.8")`
+is `false` (fine), but `version.substring(0, 3)` yields `"11."`, and code that parses the
+minor version out of `1.X` reads `0` instead of `11` — often concluding it is running on
+"Java 0" or falling into a Java 5 compatibility branch.
+
+**Search pattern**: `System.getProperty("java.version")`, `java.specification.version`,
+`startsWith("1.")`, `substring(0, 3)` on a version string.
+
+```diff
+- String v = System.getProperty("java.version");
+- int major = Integer.parseInt(v.split("\\.")[1]);   // breaks: "11.0.22" -> 0
++ int major = Runtime.version().feature();            // 11 — JEP 223 API, Java 10+
+```
+
+(`Runtime.version()` itself arrived in Java 9, where the accessor was named `major()`;
+`feature()` replaced it in Java 10. If the code must still compile on Java 8 during the
+transition, parse `java.specification.version` instead — it is `1.8` on 8 and `11` on 11.)
+
+Also check shell scripts that grep `java -version` output, and old copies of libraries
+that do their own detection (older Lombok, ASM, Groovy, and Jetty are common offenders —
+upgrade them rather than patching around it).
+
+### The application class loader is no longer a `URLClassLoader` (Java 9)
+
+In Java 8 the system/app class loader was a `URLClassLoader`; since Java 9 it is an
+internal `AppClassLoader` type that does not extend it. Casting throws
+`ClassCastException` at runtime.
+
+**Search pattern**: `(URLClassLoader)`, `ClassLoader.getSystemClassLoader()`,
+`addURL`, code that injects JARs onto the classpath at runtime.
+
+```diff
+- URLClassLoader cl = (URLClassLoader) ClassLoader.getSystemClassLoader();
+- Method m = URLClassLoader.class.getDeclaredMethod("addURL", URL.class);
+- m.setAccessible(true);
+- m.invoke(cl, jarUrl);   // ClassCastException on Java 9+
++ // Create your own loader for the extra JARs instead of mutating the system one
++ URLClassLoader pluginLoader = new URLClassLoader(new URL[] { jarUrl },
++         ClassLoader.getSystemClassLoader());
+```
+
+To enumerate the classpath, read the `java.class.path` system property rather than
+casting to `URLClassLoader` and calling `getURLs()`.
+
+### `sun.misc.BASE64Encoder` / `BASE64Decoder` removed (Java 9)
+
+These undocumented internal classes are gone.
+
+```diff
+- import sun.misc.BASE64Encoder;
+- import sun.misc.BASE64Decoder;
+- String encoded = new BASE64Encoder().encode(bytes);
+- byte[] decoded = new BASE64Decoder().decodeBuffer(encoded);
++ import java.util.Base64;
++ String encoded = Base64.getEncoder().encodeToString(bytes);
++ byte[] decoded = Base64.getDecoder().decode(encoded);
+```
+
+Note `BASE64Encoder.encode()` inserted line breaks every 76 characters; if you must
+preserve that, use `Base64.getMimeEncoder()` instead of `getEncoder()`.
+
 ### Java Platform Module System — JPMS (Java 9)
 
 Stronger encapsulation can break reflection-heavy code. Symptoms:
@@ -87,7 +157,12 @@ versions or specific cipher suites.
 </build>
 ```
 
-If the project previously used JAXB (common), add these dependencies:
+If the project previously used JAXB (common), you must add it as an explicit dependency.
+**Choose a namespace first** — this decision determines whether you touch source files:
+
+**Option A — `jakarta.*` namespace (recommended, forward-looking).** Requires rewriting
+every `javax.xml.bind.*` import, but is the only option still receiving updates and the
+only one compatible with Jakarta EE 9+ / Spring Boot 3+:
 
 ```xml
 <dependencies>
@@ -104,6 +179,31 @@ If the project previously used JAXB (common), add these dependencies:
   </dependency>
 </dependencies>
 ```
+
+**Option B — keep the `javax.*` namespace (zero source changes).** Use the 2.3.x line,
+which still uses `javax.xml.bind`. Useful when you want to de-risk the 8 → 11 hop and
+defer the namespace migration to a later change:
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>jakarta.xml.bind</groupId>
+    <artifactId>jakarta.xml.bind-api</artifactId>
+    <version>2.3.3</version> <!-- 2.3.x still uses the javax.xml.bind package -->
+  </dependency>
+  <dependency>
+    <groupId>org.glassfish.jaxb</groupId>
+    <artifactId>jaxb-runtime</artifactId>
+    <version>2.3.9</version>
+    <scope>runtime</scope>
+  </dependency>
+</dependencies>
+```
+
+> Do not mix the two. Having both `javax.xml.bind` and `jakarta.xml.bind` API jars on the
+> classpath produces confusing `ClassNotFoundException` / `JAXBException: Implementation
+> of JAXB-API has not been found` errors at runtime. Pick one and verify with
+> `mvn dependency:tree` that no transitive dependency drags in the other.
 
 ### Gradle (Groovy DSL)
 
@@ -178,7 +278,7 @@ Ensure Gradle wrapper is at least **5.0** (for Java 11 support); **6.7+** recomm
 + List<String> items = List.of("a", "b", "c");
 
 - Map<String, Integer> scores = Collections.unmodifiableMap(
--     new HashMap<>() {{ put("alice", 10); put("bob", 20); }});
+-     new HashMap<String, Integer>() {{ put("alice", 10); put("bob", 20); }});
 + Map<String, Integer> scores = Map.of("alice", 10, "bob", 20);
 ```
 

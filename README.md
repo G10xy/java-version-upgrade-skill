@@ -8,20 +8,42 @@ Give it a `pom.xml`, `build.gradle`, or source files and it will detect the curr
 
 | From | To | Key themes |
 |---|---|---|
-| 8 | 11 | Module system (JPMS), removed Java EE/CORBA modules, new APIs |
-| 11 | 17 | Records, sealed classes, pattern matching, text blocks, switch expressions |
-| 17 | 21 | Virtual threads, sequenced collections, UTF-8 default, finalize removal |
-| 21 | 25 | SecurityManager removed, Unsafe warnings, scoped values, stream gatherers, AOT |
+| 8 | 11 | Module system (JPMS), removed Java EE/CORBA modules, version-string format, new APIs |
+| 11 | 17 | Enforced encapsulation, records, sealed classes, pattern matching, text blocks, switch expressions |
+| 17 | 21 | Virtual threads, sequenced collections, UTF-8 default, CLDR date/time changes, finalize removal |
+| 21 | 25 | SecurityManager removed, Unsafe warnings, scoped values, stream gatherers, AOT, compact object headers |
 | 8 | 17/21/25 | Multi-hop — all relevant guides applied cumulatively |
+
+Java ships a feature release every six months, but only 8, 11, 17, 21 and 25 are LTS
+(and every two years thereafter). This skill covers LTS-to-LTS hops, and will tell you
+when a requested target is a non-LTS release rather than quietly implying full coverage.
 
 ## What it does
 
-1. **Detects** current and target Java version from build files
-2. **Audits** source code for removed APIs, JPMS issues, and deprecated patterns
+1. **Detects** current and target Java version from build files, CI config, Dockerfiles and toolchain files — distinguishing the *language level* from the *runtime JDK*
+2. **Audits** with the JDK's own tools (`jdeps --jdk-internals`, `jdeprscan`) before falling back to source pattern matching
 3. **Updates** Maven and Gradle build configuration with diff blocks
 4. **Refactors** code with before/after examples (records, pattern matching, virtual threads, text blocks, etc.)
 5. **Checks dependencies** against a compatibility matrix of 30+ popular libraries
-6. **Produces** a migration summary checklist (blockers → recommended → verification)
+6. **Flags silent behavior changes** — charset, locale and formatting shifts that compile cleanly but change output
+7. **Produces** a migration summary checklist (blockers → behavior changes → recommended → verification)
+
+## Design notes
+
+A few things this skill deliberately does differently:
+
+- **Two-phase sequencing.** It recommends running on the new JDK *before* raising the
+  language level, so runtime/dependency failures are separated from source failures.
+- **Silent breakage is treated as a first-class category.** The changes that cost teams
+  the most time — UTF-8 becoming the default charset in 18, and CLDR swapping the space
+  before `AM`/`PM` for a narrow no-break space in 20 — never fail a build. They fail
+  assertions and, worse, production output.
+- **Version claims are sourced.** Dependency minimums are checked against upstream
+  release notes, and entries that could not be verified are marked as such rather than
+  guessed. The matrix also carries a release-date rule: a library published before a
+  JDK's GA cannot support that JDK.
+- **Honest uncertainty.** The skill is instructed to say when something is unverified
+  instead of presenting a plausible version number as fact.
 
 ## Installation
 
@@ -90,10 +112,11 @@ java-version-upgrade/
 
 When given a Maven project on Java 8 targeting Java 17, the skill produces:
 
-- **Build config diffs** — updated `pom.xml` with compiler release, plugin versions, and new dependencies (e.g., Jakarta JAXB replacing `javax.xml.bind`)
-- **Dependency flags** — Lombok 1.18.12 → 1.18.34, Mockito 3.x → 4.x, Jackson 2.11 → 2.14+, etc.
-- **Code refactoring** — pattern matching for `instanceof`, switch expressions, text blocks, `List.of()`, `String.isBlank()`
-- **Migration checklist** — blockers, recommended improvements, and verification steps
+- **An audit plan** — `jdeps --jdk-internals` and `jdeprscan --for-removal` invocations to run against the target JDK, so internal-API usage inside third-party jars is caught too
+- **Build config diffs** — updated `pom.xml` with compiler release, plugin versions, and new dependencies (e.g., JAXB, with guidance on whether to stay on `javax.*` or move to `jakarta.*`)
+- **Dependency flags** — Lombok, Mockito, Jackson, and the bytecode libraries that break first (ASM, ByteBuddy, cglib, Javassist), plus a PowerMock removal warning where applicable
+- **Code refactoring** — pattern matching for `instanceof`, switch expressions, text blocks, `List.of()`, `String.isBlank()`, `Stream.toList()`
+- **Migration checklist** — blockers, silent behavior changes, recommended improvements, and verification steps
 
 ## Contributing
 
